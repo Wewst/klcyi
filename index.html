@@ -4428,7 +4428,7 @@
 
 <script>
 // 🌍 URL твоего бэкенда
-const BACKEND_URL = "https://telegram-gbt-2.onrender.com/";
+const BACKEND_URL = "https://telegram-gbt-2.onrender.com";
 
 // ======================== //
 //   ИНИЦИАЛИЗАЦИЯ ДАННЫХ   //
@@ -4447,9 +4447,14 @@ async function initUserData() {
         if (user) {
             console.log("👤 User found:", user);
 
+            const telegramId = user.id.toString();
             const username = user.first_name || user.username || 'Пират';
+            
+            // Обновляем UI
             document.getElementById('username').textContent = username;
             document.getElementById('profile-username').textContent = username;
+            document.getElementById('profile-number').textContent = String(telegramId).slice(-4);
+            document.getElementById('join-date').textContent = new Date().toLocaleDateString('ru-RU');
 
             // Аватар
             const avatarUrl = user.photo_url;
@@ -4461,45 +4466,50 @@ async function initUserData() {
                 profileAvatarElement.style.backgroundImage = `url(${avatarUrl})`;
             } else {
                 const defaultAvatarColor = `hsl(${Math.floor(Math.random() * 360)}, 70%, 50%)`;
-                avatarElement.innerHTML =
-                    `<svg width="140" height="140" viewBox="0 0 140 140">
+                const firstLetter = username.charAt(0).toUpperCase();
+                
+                avatarElement.innerHTML = `
+                    <svg width="140" height="140" viewBox="0 0 140 140">
                         <circle cx="70" cy="70" r="70" fill="${defaultAvatarColor}"/>
                         <text x="70" y="80" font-size="60" fill="white" text-anchor="middle" dominant-baseline="middle">
-                            ${username.charAt(0).toUpperCase()}
+                            ${firstLetter}
                         </text>
                     </svg>`;
-                profileAvatarElement.innerHTML =
-                    `<svg width="60" height="60" viewBox="0 0 60 60">
+                
+                profileAvatarElement.innerHTML = `
+                    <svg width="60" height="60" viewBox="0 0 60 60">
                         <circle cx="30" cy="30" r="30" fill="${defaultAvatarColor}"/>
                         <text x="30" y="35" font-size="30" fill="white" text-anchor="middle" dominant-baseline="middle">
-                            ${username.charAt(0).toUpperCase()}
+                            ${firstLetter}
                         </text>
                     </svg>`;
             }
 
-            document.getElementById('join-date').textContent = new Date().toLocaleDateString('ru-RU');
-            document.getElementById('profile-number').textContent = String(user.id).slice(-4);
-
+            // Кнопка назад
             if (Telegram.WebApp.BackButton) {
                 Telegram.WebApp.BackButton.show();
                 Telegram.WebApp.BackButton.onClick(handleBackButton);
             }
 
-            // 🔥 Сохраняем пользователя в бекенд
-            await saveUserToBackend(user);
+            // 🔥 Сохраняем пользователя и загружаем данные
+            const userData = await saveUserToBackend(user);
+            
+            if (userData) {
+                await loadBalanceFromBackend(telegramId);
+                await loadCartFromBackend(telegramId);
+            } else {
+                showToast('Ошибка загрузки данных');
+            }
 
         } else {
-            console.log("No user data available");
-            setupDemoData();
+            console.log("❌ No user data available - showing error");
+            showFatalError("Для работы приложения требуется авторизация в Telegram");
         }
 
     } else {
-        console.log("Not in Telegram WebApp, using demo data");
-        setupDemoData();
+        console.log("❌ Not in Telegram WebApp - showing error");
+        showFatalError("Это приложение работает только внутри Telegram");
     }
-
-    // Загрузка баланса
-    await loadBalanceFromBackend();
 }
 
 // ======================== //
@@ -4508,13 +4518,10 @@ async function initUserData() {
 async function saveUserToBackend(user) {
     try {
         const userData = {
-            id: user.id,
             telegramId: user.id,
             username: user.username || '',
             firstName: user.first_name || '',
             lastName: user.last_name || '',
-            balance: 0,
-            joinDate: new Date().toISOString(),
             avatarUrl: user.photo_url || null
         };
 
@@ -4526,112 +4533,198 @@ async function saveUserToBackend(user) {
             body: JSON.stringify(userData)
         });
 
-        if (!response.ok) throw new Error("Failed to save user");
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        }
 
         const result = await response.json();
-        localStorage.setItem('backend_user', JSON.stringify(result));
+        localStorage.setItem('user_data', JSON.stringify(result));
 
         console.log("✅ User saved to backend:", result);
+        return result;
 
     } catch (error) {
         console.error("❌ Backend user save error:", error);
+        showToast('Ошибка соединения с сервером');
+        return null;
     }
 }
 
 // ======================== //
 //   ЗАГРУЗКА БАЛАНСА      //
 // ======================== //
-async function loadBalanceFromBackend() {
+async function loadBalanceFromBackend(telegramId) {
     try {
-        const userData = JSON.parse(localStorage.getItem('backend_user') || '{}');
-        if (!userData.id) {
-            document.getElementById('balance').textContent = '0';
-            return;
+        console.log("💰 Loading balance for user:", telegramId);
+        
+        const response = await fetch(`${BACKEND_URL}/users/${telegramId}/balance`);
+        
+        if (!response.ok) {
+            throw new Error(`Balance load failed: HTTP ${response.status}`);
         }
 
-        const response = await fetch(`${BACKEND_URL}/users/${userData.id}/balance`);
-        if (!response.ok) throw new Error("Balance load failed");
-
-        const { balance } = await response.json();
+        const data = await response.json();
+        const balance = data.balance || 0;
+        
         document.getElementById('balance').textContent = balance;
-
         localStorage.setItem('userBalance', balance.toString());
-        console.log("💰 Balance loaded:", balance);
+        
+        console.log("✅ Balance loaded:", balance);
+        return balance;
 
     } catch (error) {
         console.error("❌ Balance load error:", error);
         document.getElementById('balance').textContent = '0';
+        showToast('Ошибка загрузки баланса');
+        return 0;
     }
 }
 
 // ======================== //
-//   КОРЗИНА               //
+//   ЗАГРУЗКА КОРЗИНЫ      //
+// ======================== //
+async function loadCartFromBackend(telegramId) {
+    try {
+        console.log("🛒 Loading cart for user:", telegramId);
+        
+        const response = await fetch(`${BACKEND_URL}/cart/${telegramId}`);
+        
+        if (!response.ok) {
+            throw new Error(`Cart load failed: HTTP ${response.status}`);
+        }
+
+        const cartItems = await response.json();
+        
+        // Сохраняем корзину в localStorage
+        localStorage.setItem('userCart', JSON.stringify(cartItems));
+        
+        // Обновляем счетчик корзины
+        updateCartIconCount();
+        
+        console.log("✅ Cart loaded:", cartItems.length, "items");
+        return cartItems;
+
+    } catch (error) {
+        console.error("❌ Cart load error:", error);
+        localStorage.setItem('userCart', JSON.stringify([]));
+        showToast('Ошибка загрузки корзины');
+        return [];
+    }
+}
+
+// ======================== //
+//   ДОБАВЛЕНИЕ В КОРЗИНУ  //
 // ======================== //
 async function addToCart(productId) {
-    const product = productsData.find(p => p.id === productId);
-    if (product) {
-        await saveCartToBackend(product);
-        showToast('Товар добавлен в склад!');
-        triggerVibration();
-        updateCartIconCount();
+    const user = Telegram.WebApp.initDataUnsafe?.user;
+    
+    if (!user) {
+        showToast('Требуется авторизация в Telegram');
+        return;
     }
-}
 
-async function saveCartToBackend(product) {
+    const product = productsData.find(p => p.id === productId);
+    
+    if (!product) {
+        showToast('Товар не найден');
+        return;
+    }
+
+    const telegramId = user.id.toString();
+    
     try {
-        const userData = JSON.parse(localStorage.getItem('backend_user') || '{}');
-        if (!userData.id) throw new Error("User not found in cache");
-
-        const cartItem = {
-            productId: product.id,
-            name: product.title,
-            price: product.price,
-            quantity: 1,
-            image: product.image,
-            addedAt: new Date().toISOString(),
-            userId: userData.id
-        };
-
-        console.log("📡 Sending cart to backend:", cartItem);
-
+        console.log("🛒 Adding to cart:", product.title);
+        
         const response = await fetch(`${BACKEND_URL}/cart`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(cartItem)
+            body: JSON.stringify({
+                telegramId: telegramId,
+                productId: product.id,
+                name: product.title,
+                price: product.price,
+                quantity: 1,
+                image: product.image
+            })
         });
 
-        if (!response.ok) throw new Error("Failed to save cart item");
+        if (!response.ok) {
+            throw new Error(`Add to cart failed: HTTP ${response.status}`);
+        }
 
-        const result = await response.json();
-        console.log("🛒 Cart item saved:", result);
+        // Обновляем локальную корзину
+        await loadCartFromBackend(telegramId);
+        showToast('Товар добавлен в корзину! 🎉');
+        triggerVibration();
 
     } catch (error) {
-        console.error("❌ Cart save error:", error);
+        console.error("❌ Add to cart error:", error);
+        showToast('Ошибка при добавлении товара');
     }
 }
 
 // ======================== //
-//   ДЕМО ДАННЫЕ            //
+//   ОБНОВЛЕНИЕ СЧЕТЧИКА   //
 // ======================== //
-function setupDemoData() {
-    console.log("🔄 Setting up demo data");
+function updateCartIconCount() {
+    try {
+        const cartItems = JSON.parse(localStorage.getItem('userCart') || '[]');
+        const totalItems = cartItems.reduce((total, item) => total + (item.quantity || 1), 0);
+        
+        const cartIcon = document.getElementById('cartIcon');
+        if (cartIcon) {
+            let badge = cartIcon.querySelector('.cart-badge');
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.className = 'cart-badge';
+                cartIcon.appendChild(badge);
+            }
+            badge.textContent = totalItems > 0 ? totalItems : '';
+            badge.style.display = totalItems > 0 ? 'flex' : 'none';
+        }
+        
+        // Также обновляем счетчик на странице склада если он открыт
+        const storageBadge = document.getElementById('storageCount');
+        if (storageBadge) {
+            storageBadge.textContent = totalItems > 0 ? totalItems : '';
+            storageBadge.style.display = totalItems > 0 ? 'flex' : 'none';
+        }
+        
+    } catch (error) {
+        console.error("❌ Update cart count error:", error);
+    }
+}
 
-    const username = "Капитан Джек";
-    document.getElementById('username').textContent = username;
-    document.getElementById('profile-username').textContent = username;
-
-    document.getElementById('join-date').textContent = new Date().toLocaleDateString('ru-RU');
-    document.getElementById('profile-number').textContent = '1234';
-    document.getElementById('balance').textContent = '0';
-
-    localStorage.setItem('backend_user', JSON.stringify({
-        id: 1234,
-        username: 'demo_user',
-        firstName: 'Капитан',
-        lastName: 'Джек',
-        balance: 0,
-        joinDate: new Date().toISOString()
-    }));
+// ======================== //
+//   ОБРАБОТКА ОШИБОК      //
+// ======================== //
+function showFatalError(message) {
+    // Скрываем весь контент и показываем ошибку
+    const mainContent = document.querySelector('.main-content');
+    const errorDiv = document.createElement('div');
+    
+    errorDiv.className = 'fatal-error';
+    errorDiv.innerHTML = `
+        <div style="text-align: center; padding: 40px 20px;">
+            <div style="font-size: 48px; margin-bottom: 20px;">🚫</div>
+            <h2 style="color: #ff3b30; margin-bottom: 15px;">Ошибка</h2>
+            <p style="color: #666; line-height: 1.5; margin-bottom: 20px;">${message}</p>
+            <p style="color: #888; font-size: 14px;">Откройте это приложение через Telegram</p>
+        </div>
+    `;
+    
+    if (mainContent) {
+        mainContent.innerHTML = '';
+        mainContent.appendChild(errorDiv);
+    } else {
+        document.body.innerHTML = errorDiv.innerHTML;
+    }
+    
+    // Скрываем навигацию если есть
+    const bottomNav = document.querySelector('.bottom-nav');
+    if (bottomNav) {
+        bottomNav.style.display = 'none';
+    }
 }
 
 // ======================== //
@@ -4639,9 +4732,14 @@ function setupDemoData() {
 // ======================== //
 document.addEventListener('DOMContentLoaded', function () {
     console.log("🚀 DOM loaded, initializing...");
-    initUserData();
-  
-  // Инициализация свайпов
+    
+    // Проверяем, что мы в Telegram WebApp
+    if (window.Telegram && Telegram.WebApp) {
+        initUserData();
+    } else {
+        showFatalError("Это приложение работает только внутри Telegram");
+    }
+   // Инициализация свайпов
   initSwipeHandlers();
   
   // Инициализация страницы пополнения
@@ -4651,7 +4749,7 @@ document.addEventListener('DOMContentLoaded', function () {
   if (document.getElementById('storage-page').style.display !== 'none') {
     initStoragePage();
     updateStorageBadge();
-  }
+    }
 });
 
 // Верхнее меню (вкладки)
